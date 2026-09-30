@@ -8,6 +8,8 @@
 
 //! Export Pioneer device exports as Rekordbox XML documents.
 
+#![cfg(feature = "xml")]
+
 use crate::anlz::{Content, Cue, CueList, CueType, ExtendedCue, ExtendedCueList, ANLZ};
 use crate::device::{get_playlists, DeviceExportLoader, PlaylistNode};
 use crate::pdb::io::Database;
@@ -18,9 +20,10 @@ use crate::pdb::{
 use crate::util::FileType;
 use crate::xml::{
     Collection, Document, PlaylistFolderNode, PlaylistGenericNode, PlaylistPlaylistNode,
-    PlaylistTrack, Playlists, PositionMark, Product, Tempo,
+    PlaylistTrack, Playlists, PositionMark, Product, StarRating, Tempo,
 };
 use binrw::BinRead;
+use chrono::NaiveDate;
 use fallible_iterator::FallibleIterator;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -71,10 +74,7 @@ pub fn export_device_to_xml(loader: &DeviceExportLoader) -> crate::Result<Docume
             version: env!("CARGO_PKG_VERSION").to_string(),
             company: "rekordcrate".to_string(),
         },
-        collection: Collection {
-            entries: tracks.len() as i32,
-            track: tracks,
-        },
+        collection: Collection { tracks },
         playlists: Playlists {
             node: PlaylistFolderNode {
                 name: "ROOT".to_string(),
@@ -168,13 +168,13 @@ fn track_to_xml(
         year: Some(i32::from(track.year())),
         averagebpm: Some(f64::from(track.tempo()) / 100.0),
         datemodified: None,
-        dateadded: optional_string(string_value(track.offsets.date_added())?),
+        dateadded: optional_date(&string_value(track.offsets.date_added())?)?,
         bitrate: Some(track.bitrate() as i32),
         samplerate: Some(f64::from(track.sample_rate())),
         comments: optional_string(string_value(track.offsets.comment())?),
         playcount: Some(i32::from(track.play_count())),
         lastplayed: None,
-        rating: Some(i32::from(track.rating) * 51),
+        rating: Some(star_rating(track.rating)?),
         location: file_location(export_path, &file_path)?,
         remixer: empty_attribute(),
         tonality: optional_lookup(track.key_id(), keys),
@@ -401,6 +401,27 @@ fn optional_string(value: String) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
+fn optional_date(value: &str) -> crate::Result<Option<NaiveDate>> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map(Some)
+        .map_err(|_| crate::Error::IntegrityError("invalid track date"))
+}
+
+fn star_rating(value: u8) -> crate::Result<StarRating> {
+    match value {
+        0 => Ok(StarRating::Zero),
+        1 => Ok(StarRating::One),
+        2 => Ok(StarRating::Two),
+        3 => Ok(StarRating::Three),
+        4 => Ok(StarRating::Four),
+        5 => Ok(StarRating::Five),
+        _ => Err(crate::Error::IntegrityError("invalid track rating")),
+    }
+}
+
 fn empty_attribute() -> Option<String> {
     Some(String::new())
 }
@@ -411,12 +432,42 @@ fn string_value(value: &crate::pdb::string::DeviceSQLString) -> crate::Result<St
 
 #[cfg(test)]
 mod tests {
-    use super::{percent_encode_path, playlist_node_to_xml, position_mark};
+    use super::{
+        optional_date, percent_encode_path, playlist_node_to_xml, position_mark, star_rating,
+    };
     use crate::anlz::CueType;
     use crate::device::{Playlist, PlaylistNode};
     use crate::pdb::{PlaylistTreeNodeId, TrackId};
-    use crate::xml::PlaylistGenericNode;
+    use crate::xml::{PlaylistGenericNode, StarRating};
+    use chrono::NaiveDate;
     use std::collections::{BTreeMap, HashMap};
+
+    #[test]
+    fn optional_track_date_uses_the_xml_date_type() {
+        assert_eq!(optional_date("").expect("empty date"), None);
+        assert_eq!(
+            optional_date("2026-09-30").expect("valid date"),
+            NaiveDate::from_ymd_opt(2026, 9, 30)
+        );
+        assert!(optional_date("2026-02-30").is_err());
+    }
+
+    #[test]
+    fn track_ratings_map_to_xml_star_values() {
+        let expected = [
+            StarRating::Zero,
+            StarRating::One,
+            StarRating::Two,
+            StarRating::Three,
+            StarRating::Four,
+            StarRating::Five,
+        ];
+        for (value, rating) in expected.into_iter().enumerate() {
+            assert_eq!(star_rating(value as u8).expect("valid rating"), rating);
+            assert_eq!(rating as u8, value as u8 * 51);
+        }
+        assert!(star_rating(6).is_err());
+    }
 
     #[test]
     fn hot_cue_number_is_zero_based_for_xml() {

@@ -36,6 +36,11 @@ All notable changes to this project will be documented in this file.
 - device: Load_settings, don't fail if settings files are missing
 - Build status badge/shield
 - anlz: Change type of `comment` field and capture trailing bytes
+- xml: Do not error on empty playlist nodes
+- pdb: Align Ucs2le strings to 4 bytes
+- cli: Make DumpFormat impl ValueEnum without the json feature
+- anlz: Correct waveform data structure bugs and add missing PWVC section
+- Correct frequency band mapping in waveform previews
 
 ### Documentation
 
@@ -68,6 +73,11 @@ All notable changes to this project will be documented in this file.
 - anlz: Replace FixedUtf16String with LenPrefixedWideString
 - pdb: Encapsulate database reading/writing in a lazy container
 - setting: Improve settings ergonomics
+- xml: Use proper `NaiveDate` format
+- xml: Make fields public
+- xml: Parse ratings
+- xml: Parse position mark colors
+- cli: Add JSON output support for dump cmds
 
 ### Refactor
 
@@ -100,6 +110,11 @@ All notable changes to this project will be documented in this file.
 - cli: Use Pdb abstraction for playlist listing
 - Implement Display for Settings to reduce some duplication
 - main: Improve error handling in dump-pdb
+- xml: Add `xml` feature flag
+- xml: Remove `entries` and rename `tracks` in `Collection`
+- cli: Propagate serde_json errors instead of panicking
+- Improve CLI error handling
+- Shorten syntax of run function removing map_err
 
 ### Testing
 
@@ -121,6 +136,9 @@ All notable changes to this project will be documented in this file.
 - pdb: Add tests for Menu row and page
 - pdb: Add tests for History row
 - anlz: Add roundtrip test for ExtendedCue with empty comment
+- xml: Add empty playlist case to XML test data
+- Add sweep ANLZ fixtures
+- Split sweep fixture test into one test per file
 
 ## [0.3.0] - 2025-01-23
 

@@ -46,16 +46,32 @@
 use super::PageHeapObject;
 use crate::util::{ArrayPolyfills, MaybeCalculated};
 use binrw::{binrw, io::SeekFrom, BinRead, BinResult, BinWrite};
+#[cfg(feature = "json")]
+use serde::Serialize;
+
+/// Per-item alignment requirement when writing `OffsetArrayContainer` items with calculated offsets.
+pub trait OffsetArrayItemAlignment {
+    /// Required byte alignment of the item's start offset.
+    fn required_alignment(&self) -> u16 {
+        1
+    }
+}
+
+impl OffsetArrayItemAlignment for u8 {}
+impl OffsetArrayItemAlignment for u16 {}
+impl OffsetArrayItemAlignment for u32 {}
+impl OffsetArrayItemAlignment for () {}
+impl<const N: usize> OffsetArrayItemAlignment for [u8; N] {}
 
 /// Specifies whether the offsets are stored as u8 or u16.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "json", derive(Serialize))]
 pub enum OffsetSize {
     /// Offsets are stored as u8.
     U8,
     /// Offsets are stored as u16.
     U16,
 }
-
 impl OffsetSize {
     fn bytes(&self) -> usize {
         match self {
@@ -68,6 +84,7 @@ impl OffsetSize {
 /// A container for an array of offsets and the indirectly-addressed data at those offsets.
 /// See the module documentation for an example.
 #[derive(Debug, PartialEq, Clone, Eq)]
+#[cfg_attr(feature = "json", derive(Serialize))]
 pub struct OffsetArrayContainer<T, const N: usize> {
     /// The offsets, either u8 or u16.
     /// May be calculated from the inner data during serialization.
@@ -112,6 +129,10 @@ impl<T, const N: usize> OffsetArrayContainer<T, N> {
                 message: format!("Stream position underflow: {start}-{offset}"),
             })
     }
+
+    fn aligned_offset(offset: u64, align: u16) -> u64 {
+        offset.next_multiple_of(u64::from(align.max(1)))
+    }
 }
 
 impl<T, U, const N: usize, IA> BinRead for OffsetArrayContainer<T, N>
@@ -155,7 +176,7 @@ where
 impl<T, U, const N: usize, IA> BinWrite for OffsetArrayContainer<T, N>
 where
     T: OffsetArrayItems<N, Item = U>,
-    U: for<'a> BinWrite<Args<'a> = IA>,
+    U: for<'a> BinWrite<Args<'a> = IA> + OffsetArrayItemAlignment,
     IA: Clone,
 {
     type Args<'a> = (u64, OffsetSize, IA);
@@ -174,7 +195,17 @@ where
                 let offsets_bytes = (N + 1) * offset_size.bytes();
                 writer.seek(SeekFrom::Current(offsets_bytes as i64))?;
                 let offsets_raw = items.try_map_polyfill(|v| {
-                    let offset = writer.stream_position()? - base;
+                    let current_offset = writer.stream_position()? - base;
+                    let aligned_offset =
+                        Self::aligned_offset(current_offset, v.required_alignment());
+                    let pad = aligned_offset - current_offset;
+                    if pad > 0 {
+                        for _ in 0..pad {
+                            writer.write_all(&[0u8])?;
+                        }
+                    }
+
+                    let offset = aligned_offset;
                     v.write_options(writer, endian, args.clone())?;
                     Ok::<_, binrw::Error>(offset)
                 })?;
@@ -214,18 +245,18 @@ where
 impl<T, U, const N: usize> PageHeapObject for OffsetArrayContainer<T, N>
 where
     T: OffsetArrayItems<N, Item = U> + 'static,
-    U: for<'a> PageHeapObject<Args<'a> = ()>,
+    U: for<'a> PageHeapObject<Args<'a> = ()> + OffsetArrayItemAlignment,
 {
     type Args<'a> = OffsetSize;
     fn heap_bytes_required(&self, offset_size: OffsetSize) -> u16 {
-        let offsets_bytes = (N + 1) * offset_size.bytes();
-        offsets_bytes as u16
-            + self
-                .inner
-                .as_items()
-                .into_iter()
-                .map(|item| item.heap_bytes_required(()))
-                .sum::<u16>()
+        let mut total = ((N + 1) * offset_size.bytes()) as u16;
+        for item in self.inner.as_items() {
+            if matches!(self.offsets, MaybeCalculated::Calculated) {
+                total = Self::aligned_offset(u64::from(total), item.required_alignment()) as u16;
+            }
+            total += item.heap_bytes_required(());
+        }
+        total
     }
 }
 
@@ -278,6 +309,19 @@ impl<const N: usize> PageHeapObject for OffsetArray<N> {
     }
 }
 
+#[cfg(feature = "json")]
+impl<const N: usize> Serialize for OffsetArray<N> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            OffsetArray::U8(arr) => arr.as_slice().serialize(serializer),
+            OffsetArray::U16(arr) => arr.as_slice().serialize(serializer),
+        }
+    }
+}
+
 impl<const N: usize> OffsetArray<N> {
     fn assert_offset_size_matches(&self, offset_size: OffsetSize) -> bool {
         matches!(
@@ -317,6 +361,7 @@ impl<const N: usize> From<[u16; N]> for OffsetArray<N> {
 mod test {
 
     use super::*;
+    use crate::pdb::string::DeviceSQLString;
     use crate::util::testing::{test_roundtrip_with_args, test_write};
     use crate::util::MaybeCalculated::*;
 
@@ -509,6 +554,24 @@ mod test {
         };
         test_write(
             &[0x03, 0x03, 0x04, 0xC0, 0xDE],
+            &multiple,
+            (0, OffsetSize::U8, ()),
+        );
+    }
+
+    #[test]
+    fn calculated_aligns_ucs2_item_to_4bytes() {
+        let multiple = OffsetArrayContainer {
+            offsets: Calculated,
+            inner: Multiple {
+                a: DeviceSQLString::new("foo").unwrap(),
+                b: DeviceSQLString::new("é").unwrap(),
+            },
+        };
+        test_write(
+            &[
+                0x03, 0x03, 0x08, 0x09, 0x66, 0x6F, 0x6F, 0x00, 0x90, 0x06, 0x00, 0x00, 0xE9, 0x00,
+            ],
             &multiple,
             (0, OffsetSize::U8, ()),
         );
